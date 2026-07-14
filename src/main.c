@@ -37,8 +37,8 @@ static const char *TAG = "RADAR";
 // =========================================================================
 
 // --- WiFi STA ---
-#define WIFI_SSID               "Stambul"
-#define WIFI_PASS               "CV123zxb"
+#define WIFI_SSID               "Your_SSID"
+#define WIFI_PASS               "Your_PASSWORD"
 #define WIFI_MAXIMUM_RETRY      20
 
 #define WIFI_CONNECTED_BIT      BIT0

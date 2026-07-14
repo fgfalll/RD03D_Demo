@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>RD-03D Tactical Radar</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#020a04;
+  --bg-card:rgba(4,20,8,0.85);
+  --border:#00ff41;
+  --text:#00ff41;
+  --font-mono:'Courier New',Courier,monospace;
+  --font-sans:var(--font-mono);
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);height:100vh;height:100dvh;overflow:hidden}
+.app{display:flex;flex-direction:column;height:100%}
+
+/* ===== Header ===== */
+.header{display:flex;justify-content:space-between;align-items:center;padding:10px 20px;
+  background:var(--bg-card);border-bottom:2px solid var(--border);z-index:10;flex-shrink:0}
+.logo{display:flex;align-items:center;gap:10px;font-weight:bold;font-size:16px;letter-spacing:2px}
+.header-right{display:flex;align-items:center;gap:16px}
+.status-badge{padding:4px 12px;border:1px solid var(--border);font-size:12px;font-weight:bold;text-transform:uppercase;background:rgba(0,255,65,0.1)}
+.status-badge.disconnected{border-color:red;color:red;background:rgba(255,0,0,0.1)}
+.uptime{font-size:13px;letter-spacing:1px}
+
+/* ===== Main Layout ===== */
+.main{display:flex;flex:1;overflow:hidden;min-height:0}
+.radar-section{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;min-width:0;position:relative}
+.radar-wrapper{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+.radar-container{position:relative;width:100%;height:100%;overflow:hidden;border:2px solid var(--border);background:var(--bg)}
+#radarCanvas{display:block;width:100%;height:100%}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo">[ RD-03D TACTICAL HUD ]</div>
+    <div class="header-right">
+      <div class="status-badge disconnected" id="connStatus">LINK LOST</div>
+      <div class="uptime" id="uptime">00:00:00</div>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="radar-section">
+      <div class="radar-wrapper">
+        <div class="radar-container">
+          <canvas id="radarCanvas"></canvas>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+const MAX_RANGE   = 8000;
+const FOV_HALF    = 60;
+const TRAIL_LEN   = 10;
+const COLOR       = '#00ff41';
+
+let connected   = false;
+let targets     = [{a:0},{a:0},{a:0}];
+let stats       = {ok:0, bad:0, up:0};
+let trails      = {};
+let ws          = null;
+let retryDelay  = 1000;
+
+const canvas     = document.getElementById('radarCanvas');
+const ctx        = canvas.getContext('2d');
+const connEl     = document.getElementById('connStatus');
+const uptimeEl   = document.getElementById('uptime');
+
+function resize(){
+  const box  = canvas.parentElement;
+  const dpr  = window.devicePixelRatio || 1;
+  canvas.width  = box.clientWidth * dpr;
+  canvas.height = box.clientHeight * dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+function mm2px(xmm, ymm){
+  const cw = canvas.width / (window.devicePixelRatio||1);
+  const ch = canvas.height / (window.devicePixelRatio||1);
+  // Bottom center
+  const originX = cw / 2;
+  const originY = ch - 20;
+  // Fit 8000mm in Y
+  const scale = (ch - 40) / MAX_RANGE;
+  return { x: originX + xmm * scale, y: originY - ymm * scale };
+}
+
+function draw(){
+  const cw = canvas.width / (window.devicePixelRatio||1);
+  const ch = canvas.height / (window.devicePixelRatio||1);
+  ctx.clearRect(0,0,cw,ch);
+
+  // Background Grid
+  ctx.strokeStyle = 'rgba(0,255,65,0.15)';
+  ctx.lineWidth = 1;
+  const gridSize = 50;
+  for(let x = 0; x < cw; x += gridSize){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,ch); ctx.stroke(); }
+  for(let y = 0; y < ch; y += gridSize){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(cw,y); ctx.stroke(); }
+
+  const originX = cw / 2;
+  const originY = ch - 20;
+
+  // FOV Trapezoid
+  const fovRad = FOV_HALF * Math.PI / 180;
+  ctx.beginPath();
+  ctx.moveTo(originX, originY);
+  const pLeft = mm2px(-MAX_RANGE * Math.tan(fovRad), MAX_RANGE);
+  const pRight = mm2px(MAX_RANGE * Math.tan(fovRad), MAX_RANGE);
+  ctx.lineTo(pLeft.x, pLeft.y);
+  ctx.lineTo(pRight.x, pRight.y);
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(0,255,65,0.4)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(0,255,65,0.05)';
+  ctx.fill();
+
+  // Range lines (every 2m)
+  for(let r=2000; r<=MAX_RANGE; r+=2000){
+    const yPx = mm2px(0, r).y;
+    ctx.beginPath();
+    ctx.moveTo(0, yPx);
+    ctx.lineTo(cw, yPx);
+    ctx.strokeStyle = 'rgba(0,255,65,0.3)';
+    ctx.setLineDash([5,5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = '10px Courier New';
+    ctx.fillStyle = COLOR;
+    ctx.fillText((r/1000)+'m', 5, yPx - 5);
+  }
+
+  // Sensor origin
+  ctx.beginPath();
+  ctx.arc(originX, originY, 6, 0, Math.PI*2);
+  ctx.fillStyle = COLOR;
+  ctx.fill();
+
+  // Target Trails
+  for(const id in trails){
+    const tr = trails[id];
+    for(let i=0;i<tr.length;i++){
+      const a = (i+1)/tr.length * 0.5;
+      const sz = 2;
+      const p = mm2px(tr[i].x, tr[i].y);
+      ctx.beginPath(); ctx.rect(p.x-sz,p.y-sz,sz*2,sz*2);
+      ctx.fillStyle = `rgba(0,255,65,${a})`;
+      ctx.fill();
+    }
+  }
+
+  // Targets
+  targets.forEach(function(t){
+    if(!t.a) return;
+    const p = mm2px(t.x, t.y);
+
+    // Calculate movement direction
+    let angle = -Math.PI/2;
+    if(Math.abs(t.s) > 1.0){
+        angle = Math.atan2(-t.y, t.x);
+        if(t.s < 0) angle += Math.PI;
+    }
+
+    // Draw upright triangle
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.beginPath();
+    ctx.moveTo(0, -10);
+    ctx.lineTo(7, 7);
+    ctx.lineTo(-7, 7);
+    ctx.closePath();
+    ctx.fillStyle = COLOR;
+    ctx.fill();
+    ctx.restore();
+
+    // Speed vector line
+    if(Math.abs(t.s) > 1.0){
+        const vLen = Math.max(20, Math.min(Math.abs(t.s) * 0.8, 100));
+        const endX = p.x + Math.cos(angle) * vLen;
+        const endY = p.y + Math.sin(angle) * vLen;
+        
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(endX, endY);
+        ctx.strokeStyle = COLOR;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        
+        ctx.save();
+        ctx.translate(endX, endY);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(4, 0);
+        ctx.lineTo(-4, 4);
+        ctx.lineTo(-4, -4);
+        ctx.closePath();
+        ctx.fillStyle = COLOR;
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Target characteristics block
+    ctx.font = 'bold 12px Courier New';
+    ctx.fillStyle = COLOR;
+    ctx.fillText('TRK-'+t.id, p.x + 14, p.y - 15);
+    
+    ctx.font = '10px Courier New';
+    ctx.fillStyle = 'rgba(0,255,65,0.7)';
+    ctx.fillText('POS: '+(t.x/10).toFixed(0)+','+(t.y/10).toFixed(0)+'cm', p.x + 14, p.y - 2);
+    ctx.fillText('DST: '+(t.d/1000).toFixed(2)+'m', p.x + 14, p.y + 10);
+    ctx.fillText('SPD: '+t.s.toFixed(1)+'cm/s', p.x + 14, p.y + 22);
+  });
+}
+
+function animate(){
+  draw();
+  requestAnimationFrame(animate);
+}
+
+function connectWS(){
+  ws = new WebSocket('ws://'+location.host+'/ws');
+  ws.onopen = function(){
+    connected=true; retryDelay=1000;
+    connEl.className='status-badge';
+    connEl.textContent='LINK SECURE';
+  };
+  ws.onclose = function(){
+    connected=false;
+    connEl.className='status-badge disconnected';
+    connEl.textContent='LINK LOST';
+    setTimeout(connectWS, retryDelay);
+    retryDelay = Math.min(retryDelay*2, 10000);
+  };
+  ws.onerror = function(){ ws.close(); };
+  ws.onmessage = function(ev){
+    try{ processData(JSON.parse(ev.data)); }catch(e){}
+  };
+}
+
+function processData(d){
+  targets = d.t;
+  stats.ok  = d.ok;
+  stats.bad = d.bad;
+  stats.up  = d.up;
+
+  var activeIds = {};
+  targets.forEach(function(t){
+    if(!t.a) return;
+    activeIds[t.id] = true;
+    if(!trails[t.id]) trails[t.id]=[];
+    trails[t.id].push({x:t.x, y:t.y});
+    if(trails[t.id].length > TRAIL_LEN) trails[t.id].shift();
+  });
+  for(var id in trails){
+    if(!activeIds[id]){
+      trails[id].shift();
+      if(!trails[id].length) delete trails[id];
+    }
+  }
+  updatePanel();
+}
+
+function updatePanel(){
+  var sec = Math.floor(stats.up/1000);
+  var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  uptimeEl.textContent = 'T+'+pad(h)+':'+pad(m)+':'+pad(s);
+}
+
+function pad(n){ return n<10 ? '0'+n : ''+n; }
+
+window.addEventListener('load', function(){
+  resize();
+  connectWS();
+  requestAnimationFrame(animate);
+});
+window.addEventListener('resize', resize);
+
+})();
+</script>
+</body>
+</html>

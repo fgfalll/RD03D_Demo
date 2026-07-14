@@ -79,6 +79,6 @@ pio device monitor
 ## Project Structure
 
 - `src/main.c`: The core C application (FreeRTOS tasks, Radar UART parsing, WebSocket server).
-- `src/radar_ui.html`: The HTML/CSS/JS for the pure Tactical Web UI.
+- `src/radar_ui.html`: The HTML/CSS/JS for the Web UI.
 - `generate_html_header.py`: A pre-build script that embeds the HTML file as a static C header string (`radar_web_ui.h`) for deployment.
 - `platformio.ini`: PlatformIO build configuration.
